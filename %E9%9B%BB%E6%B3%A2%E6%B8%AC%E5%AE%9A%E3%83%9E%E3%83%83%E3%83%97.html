@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f7fb">
+<title>電波測定マップ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{color-scheme:light;--bg:#f5f7fb;--card:#fff;--ink:#172033;--muted:#687386;--line:#e4e9f1;--blue:#2563eb}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:900px;margin:auto;padding:22px 15px 42px}
+h1{font-size:25px;margin:0 0 6px}p{color:var(--muted);line-height:1.55;margin:5px 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:17px;padding:16px;margin:13px 0;box-shadow:0 3px 14px #18243a08}
+label.file{display:flex;align-items:center;justify-content:center;gap:8px;background:#edf3ff;color:#1749a6;border-radius:12px;padding:15px;font-weight:650}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
+button{border:0;border-radius:11px;padding:12px 15px;font-weight:650;background:var(--blue);color:white;font-size:15px}
+button.secondary{background:#edf1f7;color:#263449}
+.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+.stat{background:#f6f8fc;border-radius:12px;padding:12px}
+.stat strong{display:block;font-size:24px}.stat span{font-size:12px;color:var(--muted)}
+#map{height:390px;border-radius:13px;background:#e9eef5}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:10px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px}
+.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600}
+.note{font-size:12px;color:var(--muted)}
+#error{color:#b42318;white-space:pre-wrap}
+@media(max-width:520px){.stats{grid-template-columns:repeat(3,1fr)}#map{height:330px}.card{padding:13px}}
+</style>
+</head>
+<body>
+<main>
+  <h1>電波測定マップ</h1>
+  <p>ショートカットで保存した測定値.txtを読み込み、GPS地点と信号バー数を地図に表示します。</p>
+  <section class="card">
+    <strong>① 測定ファイルを読み込む</strong>
+    <p class="note">iPhoneの「ファイル」から、測定値.txtを選択してください。</p>
+    <label class="file" for="file">📂 ファイルを選択</label>
+    <input id="file" type="file" accept=".txt,.csv,text/plain,text/csv">
+    <div id="filename" class="note" style="margin-top:9px">ファイル未選択</div>
+    <div id="error" role="alert"></div>
+  </section>
+
+  <section class="card">
+    <strong>② 測定の概要</strong>
+    <div class="stats" style="margin-top:12px">
+      <div class="stat"><strong id="count">—</strong><span>測定件数</span></div>
+      <div class="stat"><strong id="average">—</strong><span>平均信号バー</span></div>
+      <div class="stat"><strong id="mapped">—</strong><span>地図表示数</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <strong>③ 測定地点マップ</strong>
+    <p class="note">色は信号バー数（0〜4）の目安です。地図の表示にはインターネット接続が必要です。</p>
+    <div id="map"></div>
+    <div class="legend">
+      <span><i class="dot" style="background:#dc2626"></i>0</span>
+      <span><i class="dot" style="background:#f97316"></i>1</span>
+      <span><i class="dot" style="background:#eab308"></i>2</span>
+      <span><i class="dot" style="background:#84cc16"></i>3</span>
+      <span><i class="dot" style="background:#16a34a"></i>4</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <strong>④ 測定記録</strong>
+    <div class="actions">
+      <button id="export" disabled>CSVを書き出す</button>
+      <button id="clear" class="secondary">表示をリセット</button>
+    </div>
+    <div class="tablewrap" style="margin-top:10px">
+      <table>
+        <thead><tr><th>日時</th><th>信号バー</th><th>緯度</th><th>経度</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="4" class="note">ファイルを読み込むと表示されます。</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <p class="note">読み込んだファイルはこのページ内で処理します。サーバーへアップロードしません。位置情報は地図上に表示されるため、スクリーンショットやCSVの共有先には注意してください。</p>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+let records=[], map=null, layer=null;
+const colors=['#dc2626','#f97316','#eab308','#84cc16','#16a34a'];
+function initMap(){
+  if(!window.L){$('error').textContent='地図ライブラリを読み込めませんでした。インターネット接続を確認してください。';return;}
+  map=L.map('map').setView([35.6812,139.7671],11);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom:19, attribution:'&copy; OpenStreetMap contributors'
+  }).addTo(map);
+  layer=L.featureGroup().addTo(map);
+}
+function parseText(text){
+  const chunks=text.split(';').map(s=>s.trim()).filter(Boolean);
+  const out=[];
+  for(const chunk of chunks){
+    const lines=chunk.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    let date='', fields=[];
+    if(lines.length>=2){date=lines[0];fields=lines.slice(1).join('#').split('#').map(s=>s.trim());}
+    else {fields=lines[0].split('#').map(s=>s.trim());}
+    // 想定形式: 日付(改行)時刻#信号バー#緯度#経度
+    if(fields.length<4) continue;
+    const [time,barsRaw,latRaw,lonRaw]=fields;
+    const bars=Number(barsRaw),lat=Number(latRaw),lon=Number(lonRaw);
+    if(!Number.isFinite(bars)||!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
+    if(lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
+    out.push({datetime:(date?date+' ':'')+time,bars:Math.max(0,Math.min(4,bars)),lat,lon});
+  }
+  return out;
+}
+function render(){
+  $('count').textContent=records.length;
+  $('average').textContent=records.length?(records.reduce((a,r)=>a+r.bars,0)/records.length).toFixed(1)+'/4':'—';
+  $('mapped').textContent=records.length;
+  $('export').disabled=!records.length;
+  $('rows').innerHTML='';
+  if(!records.length){$('rows').innerHTML='<tr><td colspan="4" class="note">有効な測定データがありません。</td></tr>';return;}
+  records.slice().reverse().forEach(r=>{
+    const tr=document.createElement('tr');
+    [r.datetime,r.bars,r.lat,r.lon].forEach(v=>{const td=document.createElement('td');td.textContent=String(v);tr.appendChild(td);});
+    $('rows').appendChild(tr);
+  });
+  if(map&&layer){
+    layer.clearLayers();
+    records.forEach((r,i)=>{
+      const marker=L.circleMarker([r.lat,r.lon],{radius:8,color:'#fff',weight:2,fillColor:colors[r.bars],fillOpacity:.95});
+      marker.bindPopup(`<b>${escapeHtml(r.datetime)}</b><br>信号バー: ${r.bars}/4<br>緯度: ${r.lat}<br>経度: ${r.lon}`);
+      marker.addTo(layer);
+    });
+    if(records.length){const b=layer.getBounds();if(b.isValid())map.fitBounds(b.pad(.18),{maxZoom:17});}
+    setTimeout(()=>map.invalidateSize(),100);
+  }
+}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+$('file').addEventListener('change',async e=>{
+  const f=e.target.files[0];if(!f)return;
+  $('error').textContent='';$('filename').textContent=f.name;
+  try{
+    const text=await f.text();
+    records=parseText(text);
+    if(!records.length) $('error').textContent='データを読み取れませんでした。形式が「日付（改行）時刻#信号バー#緯度#経度;」になっているか確認してください。';
+    render();
+  }catch(err){$('error').textContent='ファイルを読み込めませんでした: '+err.message;}
+});
+$('export').addEventListener('click',()=>{
+  const q=v=>'"'+String(v).replace(/"/g,'""')+'"';
+  const csv='\uFEFF日時,信号バー,緯度,経度\r\n'+records.map(r=>[r.datetime,r.bars,r.lat,r.lon].map(q).join(',')).join('\r\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  const url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download='電波測定.csv';a.click();URL.revokeObjectURL(url);
+});
+$('clear').addEventListener('click',()=>{
+  records=[];$('file').value='';$('filename').textContent='ファイル未選択';$('error').textContent='';
+  render();if(map&&layer)map.setView([35.6812,139.7671],11);
+});
+initMap();render();
+</script>
+</body>
+</html>
