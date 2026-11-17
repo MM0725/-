@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="theme-color" content="#f5f6f8">
+<title>電波測定マップ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#20242b;background:#f5f6f8}
+*{box-sizing:border-box}body{margin:0;padding:14px;max-width:1000px;margin-inline:auto}
+h1{font-size:22px;margin:4px 0 14px}.panel{background:#fff;border:1px solid #e1e4e8;border-radius:14px;padding:13px;margin-bottom:12px}
+button,.filebtn{border:0;border-radius:9px;padding:10px 13px;font-size:14px;background:#e9edf2;color:#20242b;cursor:pointer}
+button.primary{background:#1769d2;color:white}button.danger{background:#d93025;color:#fff}
+input[type=file]{display:none}.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.stats{display:flex;gap:10px;flex-wrap:wrap}.stat{flex:1;min-width:115px;background:#f5f7fa;border-radius:10px;padding:10px}
+.stat strong{display:block;font-size:22px;margin-top:3px}.muted{color:#68717d;font-size:12px}
+#map{height:48vh;min-height:300px;border-radius:12px;z-index:1}
+#records{height:230px;overflow-y:auto;border:1px solid #e2e5e9;border-radius:10px}
+.record{padding:10px 11px;border-bottom:1px solid #eceff2;cursor:pointer}
+.record:last-child{border-bottom:0}.record:active{background:#f3f6fa}
+.recordtop{display:flex;justify-content:space-between;gap:8px;font-weight:600}
+.coords{font-size:11px;color:#68717d;margin-top:4px;overflow-wrap:anywhere}
+.signal{font-weight:700}.empty{padding:22px;text-align:center;color:#77808b;font-size:13px}
+#status{margin-top:8px;font-size:12px;color:#68717d;overflow-wrap:anywhere}
+.popup-delete{background:#d93025;color:white;border:0;border-radius:7px;padding:7px 10px;margin-top:8px}
+footer{font-size:11px;color:#78818c;text-align:center;margin:16px 0}
+</style>
+</head>
+<body>
+<h1>電波測定マップ</h1>
+
+<section class="panel">
+  <div class="controls">
+    <label class="filebtn primary" for="file">測定データを読み込む</label>
+    <input id="file" type="file" accept=".txt,.csv,text/plain,text/csv">
+    <button id="exportTxt">修正データを保存</button>
+    <button id="exportCsv">CSV出力</button>
+    <button id="undo" disabled>削除を取り消す</button>
+  </div>
+  <div id="status">測定データファイルを選択してください。</div>
+</section>
+
+<section class="panel">
+  <div class="stats">
+    <div class="stat"><span class="muted">測定件数</span><strong id="count">0</strong></div>
+    <div class="stat"><span class="muted">平均信号バー数</span><strong id="average">—</strong></div>
+  </div>
+</section>
+
+<section class="panel">
+  <div id="map"></div>
+  <div class="muted" style="margin-top:8px">ピンをタップすると測定情報と削除ボタンが表示されます。</div>
+</section>
+
+<section class="panel">
+  <h2 style="font-size:17px;margin:0 0 10px">測定データ一覧</h2>
+  <div class="muted" style="margin-bottom:8px">新しい記録が上に表示されます。リスト内をスクロールできます。</div>
+  <div id="records"><div class="empty">まだ測定データがありません。</div></div>
+</section>
+<footer>地図データ © OpenStreetMap contributors</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(() => {
+  const map = L.map('map').setView([35.6812,139.7671], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom:19, attribution:'&copy; OpenStreetMap'
+  }).addTo(map);
+
+  let records = [];
+  let markers = [];
+  let undoStack = [];
+  let sourceName = '電波測定データ.txt';
+  const $ = id => document.getElementById(id);
+  const colors = ['#e53935','#fb8c00','#fdd835','#9ccc65','#43a047'];
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function parseData(text){
+    const out=[];
+    let currentDate='';
+    // The format is: date newline time#bars#latitude#longitude;
+    // A date may be repeated for each record or shared by following records.
+    const chunks=text.replace(/\r/g,'').split(';');
+    for(let chunk of chunks){
+      chunk=chunk.trim();
+      if(!chunk) continue;
+      const lines=chunk.split('\n').map(x=>x.trim()).filter(Boolean);
+      if(!lines.length) continue;
+      let dataLine=lines[lines.length-1];
+      if(lines.length>1) currentDate=lines[0];
+      else {
+        const m=dataLine.match(/^(\d{4}[\/-]\d{1,2}[\/-]\d{1,2})\s+(.+)$/);
+        if(m){currentDate=m[1];dataLine=m[2];}
+      }
+      const p=dataLine.split('#').map(x=>x.trim());
+      if(p.length<4) continue;
+      const time=p[0], bars=Number(p[1]), lat=Number(p[2]), lon=Number(p[3]);
+      if(!Number.isFinite(bars)||bars<0||bars>4||!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180) continue;
+      out.push({date:currentDate,time,bars,lat,lon,id:crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random())});
+    }
+    return out;
+  }
+  function colorFor(n){return colors[Math.max(0,Math.min(4,Math.round(n)))];}
+  function removeMarkers(){markers.forEach(m=>map.removeLayer(m));markers=[];}
+  function render(){
+    $('count').textContent=records.length.toLocaleString('ja-JP');
+    $('average').textContent=records.length?(records.reduce((s,r)=>s+r.bars,0)/records.length).toFixed(2)+' / 4':'—';
+    const list=$('records'); list.innerHTML='';
+    if(!records.length){list.innerHTML='<div class="empty">測定データがありません。</div>';}
+    [...records].reverse().forEach(r=>{
+      const el=document.createElement('div');el.className='record';
+      const dateTime=[r.date,r.time].filter(Boolean).join(' ');
+      el.innerHTML=`<div class="recordtop"><span>${escapeHtml(dateTime||'日時不明')}</span><span class="signal" style="color:${colorFor(r.bars)}">${r.bars} / 4</span></div><div class="coords">${r.lat.toFixed(6)}, ${r.lon.toFixed(6)}</div>`;
+      el.addEventListener('click',()=>{map.setView([r.lat,r.lon],Math.max(map.getZoom(),16));const m=markers.find(x=>x._recordId===r.id);if(m)m.openPopup();});
+      list.appendChild(el);
+    });
+    removeMarkers();
+    records.forEach(r=>{
+      const marker=L.circleMarker([r.lat,r.lon],{
+        radius:7,fillColor:colorFor(r.bars),color:colorFor(r.bars),
+        weight:0,stroke:false,fillOpacity:0.95
+      }).addTo(map);
+      marker._recordId=r.id;
+      marker.bindPopup(`<div><b>${escapeHtml([r.date,r.time].filter(Boolean).join(' ')||'日時不明')}</b><br>信号バー数：${r.bars} / 4<br>緯度：${r.lat}<br>経度：${r.lon}<br><button class="popup-delete" data-delete="${escapeHtml(r.id)}">この測定記録を削除</button></div>`);
+      marker.on('popupopen',e=>{
+        const btn=e.popup.getElement().querySelector('[data-delete]');
+        if(btn)btn.addEventListener('click',()=>deleteRecord(r.id));
+      });
+      markers.push(marker);
+    });
+    if(records.length===1)map.setView([records[0].lat,records[0].lon],16);
+    else if(records.length>1){const group=L.featureGroup(markers);map.fitBounds(group.getBounds().pad(0.12),{maxZoom:16});}
+    $('undo').disabled=!undoStack.length;
+  }
+  function deleteRecord(id){
+    const index=records.findIndex(r=>r.id===id);if(index<0)return;
+    const removed=records.splice(index,1)[0];
+    undoStack.push({record:removed,index});
+    render();$('status').textContent='測定記録を1件削除しました。「削除を取り消す」で元に戻せます。';
+  }
+  $('undo').addEventListener('click',()=>{
+    const item=undoStack.pop();if(!item)return;
+    records.splice(Math.min(item.index,records.length),0,item.record);
+    render();$('status').textContent='削除を取り消しました。';
+  });
+  $('file').addEventListener('change',async e=>{
+    const f=e.target.files[0];if(!f)return;
+    sourceName=f.name;const text=await f.text();records=parseData(text);undoStack=[];
+    render();$('status').textContent=`${f.name}：${records.length}件を読み込みました。`;
+    e.target.value='';
+  });
+  function makeText(){
+    // Keep the user's original delimiter convention.
+    return records.map(r=>`${r.date||''}\n${r.time}#${r.bars}#${r.lat}#${r.lon};`).join('\n');
+  }
+  function download(name,content,type){
+    const blob=new Blob([content],{type});
+    const url=URL.createObjectURL(blob);const a=document.createElement('a');
+    a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+  $('exportTxt').addEventListener('click',()=>{
+    if(!records.length){$('status').textContent='保存する測定データがありません。';return;}
+    download('電波測定データ_修正版.txt',makeText(),'text/plain;charset=utf-8');
+  });
+  $('exportCsv').addEventListener('click',()=>{
+    if(!records.length){$('status').textContent='出力する測定データがありません。';return;}
+    const rows=[['日付','時刻','信号バー数','緯度','経度'],...records.map(r=>[r.date,r.time,r.bars,r.lat,r.lon])];
+    const csv='\uFEFF'+rows.map(row=>row.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
+    download('電波測定データ.csv',csv,'text/csv;charset=utf-8');
+  });
+})();
+</script>
+</body>
+</html>
